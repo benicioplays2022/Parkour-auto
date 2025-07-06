@@ -1,0 +1,417 @@
+-- Parkour Automation Script - Julho 2025
+
+local player = game.Players.LocalPlayer
+local mouse = player:GetMouse()
+local char = player.Character or player.CharacterAdded:Wait()
+local hum = char:WaitForChild("Humanoid")
+local hrp = char:WaitForChild("HumanoidRootPart")
+local PathfindingService = game:GetService("PathfindingService")
+local UserInputService = game:GetService("UserInputService")
+
+local points = {}
+local routes = {}
+local editMode = false
+local routeName = "default"
+local pointType = "Normal"
+local visualMode = "Button"
+
+local visuals = {}
+
+local function clearVisuals()
+    for _, v in pairs(visuals) do
+        if v and v.Parent then v:Destroy() end
+    end
+    visuals = {}
+end
+
+-- GUI Setup
+local gui = Instance.new("ScreenGui")
+gui.Name = "ParkourUI"
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 300, 0, 420)
+frame.Position = UDim2.new(0, 10, 0.5, -210)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Parent = gui
+
+-- Drag behavior
+local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
+local function update(input)
+    local delta = input.Position - dragStart
+    frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                                startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+frame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = frame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+frame.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then dragInput = input end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then update(input) end
+end)
+
+-- Minimize / Maximize
+local btnMinimize = Instance.new("TextButton", frame)
+btnMinimize.Size = UDim2.new(0, 30, 0, 30)
+btnMinimize.Position = UDim2.new(1, -60, 0, 5)
+btnMinimize.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+btnMinimize.Text = "—"
+btnMinimize.Font = Enum.Font.GothamBold
+btnMinimize.TextSize = 24
+btnMinimize.TextColor3 = Color3.new(1,1,1)
+
+local btnMaximize = btnMinimize:Clone()
+btnMaximize.Parent = frame
+btnMaximize.Position = UDim2.new(1, -30, 0, 5)
+btnMaximize.Text = "⬜"
+btnMaximize.TextSize = 20
+
+local isMinimized = false
+local defaultSize = frame.Size
+local defaultPosition = frame.Position
+
+btnMinimize.MouseButton1Click:Connect(function()
+    if not isMinimized then
+        for _, content in pairs(tabContents) do content.Visible = false end
+        for _, b in pairs(tabButtons) do b.Visible = false end
+        frame.Size = UDim2.new(frame.Size.X.Scale, frame.Size.X.Offset, 0, 40)
+    else
+        tabButtons["Editor"].Visible = true
+        tabContents["Editor"].Visible = true
+        frame.Size = defaultSize
+    end
+    isMinimized = not isMinimized
+end)
+
+btnMaximize.MouseButton1Click:Connect(function()
+    if frame.Size == defaultSize then
+        frame.Size = UDim2.new(0, 600, 0, 700)
+        frame.Position = UDim2.new(0.5, -300, 0.5, -350)
+    else
+        frame.Size = defaultSize
+        frame.Position = defaultPosition
+    end
+end)
+
+-- Tabs
+local tabButtons = {}
+local tabContents = {}
+
+local tabsFrame = Instance.new("Frame", frame)
+tabsFrame.Size = UDim2.new(1,0,0,30)
+tabsFrame.Position = UDim2.new(0,0,0,40)
+tabsFrame.BackgroundTransparency = 1
+
+local function createTab(name, posX)
+    local btn = Instance.new("TextButton", tabsFrame)
+    btn.Size = UDim2.new(0, 90, 1, 0)
+    btn.Position = UDim2.new(0, posX, 0, 0)
+    btn.Text = name
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 16
+    btn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+    btn.TextColor3 = Color3.fromRGB(180,180,180)
+
+    local content = Instance.new("Frame", frame)
+    content.Size = UDim2.new(1, -20, 1, -80)
+    content.Position = UDim2.new(0,10,0,70)
+    content.BackgroundColor3 = Color3.fromRGB(35,35,35)
+    content.Visible = false
+
+    tabButtons[name] = btn
+    tabContents[name] = content
+
+    btn.MouseButton1Click:Connect(function()
+        for k,v in pairs(tabContents) do
+            v.Visible = false
+            tabButtons[k].BackgroundColor3 = Color3.fromRGB(40,40,40)
+            tabButtons[k].TextColor3 = Color3.fromRGB(180,180,180)
+        end
+        content.Visible = true
+        btn.BackgroundColor3 = Color3.fromRGB(0,200,120)
+        btn.TextColor3 = Color3.new(1,1,1)
+    end)
+end
+
+createTab("Editor", 0)
+createTab("Rota", 100)
+createTab("Execucao", 200)
+
+-- Initial active tab
+for k in pairs(tabButtons) do
+    tabButtons[k].BackgroundColor3 = Color3.fromRGB(40,40,40)
+    tabButtons[k].TextColor3 = Color3.fromRGB(180,180,180)
+    tabContents[k].Visible = false
+end
+tabContents["Editor"].Visible = true
+tabButtons["Editor"].BackgroundColor3 = Color3.fromRGB(0,200,120)
+tabButtons["Editor"].TextColor3 = Color3.new(1,1,1)
+
+-- Draw points and visuals
+local function drawPoints(list, mode)
+    clearVisuals()
+    for i, p in ipairs(list) do
+        local clr = BrickColor.new("Bright green")
+        if mode=="Load" then clr=BrickColor.new("Bright blue")
+        elseif mode=="Code" then clr=BrickColor.new("Bright yellow")
+        elseif p.tipo=="Jump" then clr=BrickColor.new("Royal purple") end
+
+        if visualMode=="Button" or #list==1 then
+            local part = Instance.new("Part", workspace)
+            part.Size = Vector3.new(0.5,0.5,0.5)
+            part.Anchored=true
+            part.CanCollide=false
+            part.Transparency=0.4
+            part.BrickColor=clr
+            part.Material=Enum.Material.Neon
+            part.Position = p.pos + Vector3.new(0,1,0)
+            table.insert(visuals, part)
+        elseif i>1 then
+            local prev = list[i-1]
+            local dist=(p.pos-prev.pos).Magnitude
+            local line = Instance.new("Part", workspace)
+            line.Size = Vector3.new(0.15,0.15,dist)
+            line.CFrame = CFrame.new(prev.pos, p.pos)*CFrame.new(0,0,-dist/2)
+            line.Anchored=true
+            line.CanCollide=false
+            line.Transparency=0.3
+            line.Material=Enum.Material.Neon
+            line.BrickColor=clr
+            table.insert(visuals, line)
+        end
+    end
+end
+
+-- Encode / Decode
+local function encode(tbl)
+    local s=""
+    for _,p in ipairs(tbl) do
+        s..=string.format("%.2f,%.2f,%.2f,%s|",p.pos.X,p.pos.Y,p.pos.Z,p.tipo)
+    end
+    return s
+end
+
+local function decode(str)
+    local out={}
+    for x,y,z,tp in string.gmatch(str,"([%-%d%.]+),([%-%d%.]+),([%-%d%.]+),(%a+)|") do
+        table.insert(out,{pos=Vector3.new(tonumber(x),tonumber(y),tonumber(z)),tipo=tp})
+    end
+    return out
+end
+
+-- Editor tab
+do
+    local e=tabContents["Editor"]
+    local btnE = Instance.new("TextButton",e)
+    btnE.Size=UDim2.new(1,-20,0,30);btnE.Position=UDim2.new(0,10,0,10)
+    btnE.Text="Modo edição: OFF";btnE.Font=Enum.Font.Gotham;btnE.TextSize=18
+    btnE.BackgroundColor3=Color3.fromRGB(80,80,80);btnE.TextColor3=Color3.new(1,1,1)
+    btnE.AutoButtonColor=true
+    btnE.MouseButton1Click:Connect(function()
+        editMode=not editMode
+        btnE.Text="Modo edição: "..(editMode and "ON" or "OFF")
+    end)
+
+    local btnType = Instance.new("TextButton",e)
+    btnType.Size=UDim2.new(1,-20,0,30);btnType.Position=UDim2.new(0,10,0,50)
+    btnType.Text="Tipo de ponto: Normal";btnType.Font=Enum.Font.Gotham;btnType.TextSize=18
+    btnType.BackgroundColor3=Color3.fromRGB(0,150,255);btnType.TextColor3=Color3.new(1,1,1)
+    btnType.AutoButtonColor=true
+    btnType.MouseButton1Click:Connect(function()
+        if pointType=="Normal" then pointType="Jump" btnType.Text="Tipo de ponto: Jump"
+        else pointType="Normal" btnType.Text="Tipo de ponto: Normal" end
+    end)
+
+    local btnRem = Instance.new("TextButton",e)
+    btnRem.Size=UDim2.new(1,-20,0,30);btnRem.Position=UDim2.new(0,10,0,90)
+    btnRem.Text="Remover último ponto";btnRem.Font=Enum.Font.Gotham;btnRem.TextSize=18
+    btnRem.BackgroundColor3=Color3.fromRGB(180,0,0);btnRem.TextColor3=Color3.new(1,1,1)
+    btnRem.AutoButtonColor=true
+    btnRem.MouseButton1Click:Connect(function()
+        if #points>0 then
+            table.remove(points)
+            drawPoints(points)
+        end
+    end)
+
+    mouse.Button1Down:Connect(function()
+        if editMode and mouse.Target then
+            table.insert(points,{pos=mouse.Hit.Position,tipo=pointType})
+            drawPoints(points)
+        end
+    end)
+end
+
+-- Rota tab
+do
+    local r=tabContents["Rota"]
+    local routeBox = Instance.new("TextBox",r)
+    routeBox.Size=UDim2.new(1,-20,0,30);routeBox.Position=UDim2.new(0,10,0,10)
+    routeBox.PlaceholderText="Nome da rota";routeBox.BackgroundColor3=Color3.fromRGB(45,45,45)
+    routeBox.TextColor3=Color3.new(1,1,1);routeBox.ClearTextOnFocus=false
+    routeBox.FocusLost:Connect(function()
+        if routeBox.Text~="" then routeName=routeBox.Text end
+    end)
+
+    local btnSave = Instance.new("TextButton",r)
+    btnSave.Size=UDim2.new(1,-20,0,30);btnSave.Position=UDim2.new(0,10,0,60)
+    btnSave.Text="Salvar Rota";btnSave.Font=Enum.Font.Gotham;btnSave.TextSize=18
+    btnSave.BackgroundColor3=Color3.fromRGB(0,150,0);btnSave.TextColor3=Color3.new(1,1,1)
+    btnSave.AutoButtonColor=true
+    btnSave.MouseButton1Click:Connect(function()
+        if #points>0 then
+            local code=encode(points)
+            routes[routeName]=code
+            setclipboard(code)
+            warn("Código copiado: "..routeName)
+        end
+    end)
+
+    local btnLoad = Instance.new("TextButton",r)
+    btnLoad.Size=UDim2.new(1,-20,0,30);btnLoad.Position=UDim2.new(0,10,0,100)
+    btnLoad.Text="Carregar Rota";btnLoad.Font=Enum.Font.Gotham;btnLoad.TextSize=18
+    btnLoad.BackgroundColor3=Color3.fromRGB(0,150,255);btnLoad.TextColor3=Color3.new(1,1,1)
+    btnLoad.AutoButtonColor=true
+    btnLoad.MouseButton1Click:Connect(function()
+        if routes[routeName] then
+            points=decode(routes[routeName])
+            drawPoints(points,"Load")
+        else
+            warn("Rota não encontrada")
+        end
+    end)
+
+    local codeBox = Instance.new("TextBox",r)
+    codeBox.Size=UDim2.new(1,-20,0,80);codeBox.Position=UDim2.new(0,10,0,150)
+    codeBox.PlaceholderText="Cole o código aqui";codeBox.BackgroundColor3=Color3.fromRGB(45,45,45)
+    codeBox.TextColor3=Color3.new(1,1,1);codeBox.ClearTextOnFocus=false;codeBox.MultiLine=true
+
+    local btnCode = Instance.new("TextButton",r)
+    btnCode.Size=UDim2.new(1,-20,0,30);btnCode.Position=UDim2.new(0,10,0,240)
+    btnCode.Text="Carregar código";btnCode.Font=Enum.Font.Gotham;btnCode.TextSize=18
+    btnCode.BackgroundColor3=Color3.fromRGB(0,150,255);btnCode.TextColor3=Color3.new(1,1,1)
+    btnCode.AutoButtonColor=true
+    btnCode.MouseButton1Click:Connect(function()
+        if codeBox.Text~="" then
+            points=decode(codeBox.Text)
+            drawPoints(points,"Code")
+        end
+    end)
+
+    local btnVis = Instance.new("TextButton",r)
+    btnVis.Size=UDim2.new(1,-20,0,30);btnVis.Position=UDim2.new(0,10,0,280)
+    btnVis.Text="Visual: Botão";btnVis.Font=Enum.Font.Gotham;btnVis.TextSize=18
+    btnVis.BackgroundColor3=Color3.fromRGB(0,255,150);btnVis.TextColor3=Color3.new(1,1,1)
+    btnVis.AutoButtonColor=true
+    btnVis.MouseButton1Click:Connect(function()
+        visualMode=(visualMode=="Button" and "Line" or "Button")
+        btnVis.Text="Visual: "..(visualMode=="Button" and "Botão" or "Linha")
+        drawPoints(points)
+    end)
+end
+
+-- Execution tab
+do
+    local e=tabContents["Execucao"]
+
+    local habLabel=Instance.new("TextLabel",e)
+    habLabel.Size=UDim2.new(1,-20,0,30);habLabel.Position=UDim2.new(0,10,0,10)
+    habLabel.BackgroundTransparency=1
+    habLabel.Text="Habilidade: 0.00"
+    habLabel.Font=Enum.Font.Gotham;habLabel.TextSize=20
+    habLabel.TextColor3=Color3.fromRGB(200,200,200)
+
+    local executeBtn=Instance.new("TextButton",e)
+    executeBtn.Size=UDim2.new(1,-20,0,30);executeBtn.Position=UDim2.new(0,10,0,60)
+    executeBtn.Text="Executar Rota";executeBtn.Font=Enum.Font.Gotham;executeBtn.TextSize=18
+    executeBtn.TextColor3=Color3.new(1,1,1);executeBtn.BackgroundColor3=Color3.fromRGB(255,0,0)
+    executeBtn.AutoButtonColor=true
+
+    local function safeJump(destY)
+        if destY - hrp.Position.Y > 5 then hum.Jump = true end
+    end
+
+    local function hasGroundUnder(pointA, pointB)
+        if pointB.Y - pointA.Y < -15 then
+            local ray = RaycastParams.new()
+            ray.FilterType = Enum.RaycastFilterType.Blacklist
+            ray.FilterDescendantsInstances = {char}
+            local res = workspace:Raycast(pointB, Vector3.new(0,-100,0), ray)
+            return res
+        end
+        return true
+    end
+
+    executeBtn.MouseButton1Click:Connect(function()
+        if #points == 0 then return end
+
+        task.spawn(function()
+            for i,p in ipairs(points) do
+                local dest = p.pos
+                if i>1 and not hasGroundUnder(points[i-1].pos, dest) then
+                    warn("Queda perigosa detectada. Rota parada.")
+                    break
+                end
+
+                -- Create invisible checkpoint
+                local cp = Instance.new("Part", workspace)
+                cp.Size = Vector3.new(2,2,2)
+                cp.Anchored = true
+                cp.CanCollide = false
+                cp.Transparency = 1
+                cp.Position = dest
+
+                local touched = false
+                local conn
+                conn = cp.Touched:Connect(function(hit)
+                    if hit:IsDescendantOf(char) then
+                        touched = true
+                        conn:Disconnect()
+                    end
+                end)
+
+                -- Compute and follow path
+                local path = PathfindingService:CreatePath({
+                    AgentRadius=2, AgentHeight=5, AgentCanJump=true,
+                    AgentJumpHeight=10, AgentCanClimb=true
+                })
+                path:ComputeAsync(hrp.Position, dest)
+
+                if path.Status==Enum.PathStatus.Complete then
+                    for _, wp in ipairs(path:GetWaypoints()) do
+                        if wp.Action==Enum.PathWaypointAction.Jump then hum.Jump = true end
+                        safeJump(dest.Y)
+                        hum:MoveTo(wp.Position)
+                        hum.MoveToFinished:Wait()
+                    end
+                else
+                    warn("Path inválido até:", dest)
+                end
+
+                while not touched do task.wait() end
+                cp:Destroy()
+            end
+        end)
+    end)
+
+    -- Optional: skill label updater
+    local habVal = 0
+    task.spawn(function()
+        while true do
+            habLabel.Text = ("Habilidade: %.2f"):format(habVal)
+            task.wait(1)
+        end
+    end)
+end
